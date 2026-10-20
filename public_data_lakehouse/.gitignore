@@ -1,0 +1,20 @@
+# local environment & secrets
+.env
+.env.*
+!.env.example
+.databrickscfg
+*.pem
+*.key
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# downloaded source data, temporary files and logs
+data/
+logs/
+*.log
+tmp/
+
+# Databricks bundle state
+.databricks/

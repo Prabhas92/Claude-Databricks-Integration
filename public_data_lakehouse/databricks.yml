@@ -1,0 +1,37 @@
+# Declarative Automation Bundle (Databricks Asset Bundle) for public_data_lakehouse.
+# Auth comes from the CLI profile (e.g. DATABRICKS_CONFIG_PROFILE); no host, IDs or secrets here.
+bundle:
+  name: public_data_lakehouse
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Unity Catalog catalog that holds the bronze/silver/gold schemas
+    default: claudedatabricksintegration
+  bronze_schema:
+    default: bronze
+  silver_schema:
+    default: silver
+  gold_schema:
+    default: gold
+  warehouse_id:
+    description: SQL warehouse used to create/refresh materialized views (resolved by name)
+    lookup:
+      warehouse: Serverless Starter Warehouse
+
+sync:
+  exclude:
+    - data/**
+    - .venv/**
+    - tests/**
+
+targets:
+  dev:
+    mode: development   # prefixes job names with [dev <user>] and pauses schedules
+    default: true
+  prod:
+    mode: production
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

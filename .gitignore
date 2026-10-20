@@ -1,0 +1,23 @@
+# Installed AI Dev Kit / databricks aitools skills (reinstall with the AI Dev Kit installer)
+.claude/
+.databricks/
+.github/skills/
+.ai-dev-kit/*
+!.ai-dev-kit/skills.lock
+!.ai-dev-kit/version
+
+# Python / local environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.databrickscfg
+
+# Data, logs, OS files
+data/
+logs/
+*.log
+.DS_Store

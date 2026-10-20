@@ -1,0 +1,220 @@
+# Three jobs. Gold materialized views run on the SQL warehouse in a SEPARATE job because on
+# Databricks Free Edition MV refresh compute cannot run while serverless job compute is active
+# (verified: RESOURCE_EXHAUSTED). lakehouse_end_to_end chains the two with run_job_task.
+
+x-common-params: &py_env
+  environment_key: default
+
+# Fully qualified source names for IDENTIFIER(:param) in sql/gold/*.sql. Materialized views reject
+# IDENTIFIER() over a concatenation, so the bundle builds the names.
+x-gold-sources: &gold_sources
+  fact_order_details: "`${var.catalog}`.`${var.silver_schema}`.`fact_order_details`"
+  dim_customer: "`${var.catalog}`.`${var.silver_schema}`.`dim_customer`"
+  dim_seller: "`${var.catalog}`.`${var.silver_schema}`.`dim_seller`"
+  orders: "`${var.catalog}`.`${var.silver_schema}`.`orders`"
+  payments: "`${var.catalog}`.`${var.silver_schema}`.`payments`"
+
+resources:
+  jobs:
+    lakehouse_bronze_silver:
+      name: public_data_lakehouse_bronze_silver
+      description: Download Olist public data, load bronze Delta tables, build silver, run DQ.
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
+      tags: {project: public_data_lakehouse}
+      parameters:
+        - {name: force_reload, default: ""}
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies: [pyyaml]
+      tasks:
+        - task_key: validate_environment
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters:
+              - --step
+              - validate
+              - --catalog
+              - ${var.catalog}
+              - --bronze-schema
+              - ${var.bronze_schema}
+              - --silver-schema
+              - ${var.silver_schema}
+              - --gold-schema
+              - ${var.gold_schema}
+              - --run-id
+              - "{{job.run_id}}"
+              - --project-root
+              - ${workspace.file_path}
+        - task_key: bronze_ingest
+          depends_on: [{task_key: validate_environment}]
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, bronze, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}",
+                         "{{job.parameters.force_reload}}"]
+        - task_key: bronze_dq
+          depends_on: [{task_key: bronze_ingest}]
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, bronze_dq, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}"]
+        - task_key: silver_build
+          depends_on: [{task_key: bronze_dq}]
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, silver, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}"]
+        - task_key: silver_dq
+          depends_on: [{task_key: silver_build}]
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, silver_dq, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}"]
+
+    lakehouse_gold:
+      name: public_data_lakehouse_gold
+      description: Create/refresh Gold materialized views on the SQL warehouse, then run Gold DQ and the summary.
+      max_concurrent_runs: 1
+      timeout_seconds: 7200
+      tags: {project: public_data_lakehouse}
+      environments:
+        - environment_key: default
+          spec:
+            environment_version: "4"
+            dependencies: [pyyaml]
+      tasks:
+        - task_key: mv_daily_sales
+          max_retries: 5
+          min_retry_interval_millis: 180000   # Free Edition: the previous MV's refresh compute takes a few minutes to release
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/01_mv_daily_sales.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_daily_sales`"
+        - task_key: mv_monthly_revenue
+          depends_on: [{task_key: mv_daily_sales}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/02_mv_monthly_revenue.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_monthly_revenue`"
+        - task_key: mv_product_performance
+          depends_on: [{task_key: mv_monthly_revenue}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/03_mv_product_performance.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_product_performance`"
+        - task_key: mv_customer_analytics
+          depends_on: [{task_key: mv_product_performance}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/04_mv_customer_analytics.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_customer_analytics`"
+        - task_key: mv_customer_state_summary
+          depends_on: [{task_key: mv_customer_analytics}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/05_mv_customer_state_summary.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_customer_state_summary`"
+        - task_key: mv_seller_performance
+          depends_on: [{task_key: mv_customer_state_summary}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/06_mv_seller_performance.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_seller_performance`"
+        - task_key: mv_order_fulfillment
+          depends_on: [{task_key: mv_seller_performance}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/07_mv_order_fulfillment.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_order_fulfillment`"
+        - task_key: mv_payment_analytics
+          depends_on: [{task_key: mv_order_fulfillment}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/08_mv_payment_analytics.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_payment_analytics`"
+        - task_key: mv_payment_reconciliation
+          depends_on: [{task_key: mv_payment_analytics}]
+          max_retries: 5
+          min_retry_interval_millis: 180000
+          sql_task:
+            warehouse_id: ${var.warehouse_id}
+            file: {path: ../sql/gold/09_mv_payment_reconciliation.sql}
+            parameters:
+              <<: *gold_sources
+              target: "`${var.catalog}`.`${var.gold_schema}`.`mv_payment_reconciliation`"
+        - task_key: gold_dq
+          depends_on: [{task_key: mv_payment_reconciliation}]
+          max_retries: 2
+          min_retry_interval_millis: 120000
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, gold_dq, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}"]
+        - task_key: summary
+          depends_on: [{task_key: gold_dq}]
+          <<: *py_env
+          spark_python_task:
+            python_file: ../src/orchestration/run_pipeline.py
+            parameters: [--step, summary, --catalog, "${var.catalog}", --bronze-schema, "${var.bronze_schema}",
+                         --silver-schema, "${var.silver_schema}", --gold-schema, "${var.gold_schema}",
+                         --run-id, "{{job.run_id}}", --project-root, "${workspace.file_path}"]
+
+    lakehouse_end_to_end:
+      name: public_data_lakehouse_end_to_end
+      description: Orchestrator - bronze/silver job, then gold job. Failures propagate via run_job_task.
+      max_concurrent_runs: 1
+      tags: {project: public_data_lakehouse}
+      schedule:
+        quartz_cron_expression: "0 0 6 ? * MON"   # weekly; the public source is a static snapshot
+        timezone_id: UTC
+        pause_status: PAUSED                      # opt-in: unpause explicitly to avoid surprise costs
+      tasks:
+        - task_key: bronze_silver
+          run_job_task: {job_id: "${resources.jobs.lakehouse_bronze_silver.id}"}
+        - task_key: gold
+          depends_on: [{task_key: bronze_silver}]
+          run_job_task: {job_id: "${resources.jobs.lakehouse_gold.id}"}

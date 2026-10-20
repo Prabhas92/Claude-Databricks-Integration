@@ -1,0 +1,161 @@
+# Central configuration for public_data_lakehouse.
+# Every catalog / schema / table / volume name used by the pipeline comes from here.
+# The catalog can be overridden with the LAKEHOUSE_CATALOG env var or the --catalog CLI arg
+# (the Databricks job passes the bundle variable `catalog`).
+
+project_name: public_data_lakehouse
+catalog: claudedatabricksintegration
+
+schemas:
+  bronze: bronze
+  silver: silver
+  gold: gold
+
+# Managed UC volume (inside the bronze schema) used as the landing zone for downloaded files.
+landing_volume: landing
+landing_subdir: olist
+
+# snapshot      -> each distinct source file (by SHA-256) is one snapshot; reruns of the same file
+#                  replace that snapshot only (idempotent), unchanged files are skipped.
+# full_refresh  -> bronze table is overwritten with the current snapshot only.
+load_mode: snapshot
+
+# materialized_view -> Gold objects are Unity Catalog materialized views (requires a SQL warehouse)
+# table             -> documented fallback: Gold Delta tables rebuilt with CREATE OR REPLACE TABLE
+gold_object_type: materialized_view
+gold_object_prefix:
+  materialized_view: mv_
+  table: agg_
+
+# Name of the SQL warehouse used to create/refresh materialized views (looked up by name, never by ID).
+sql_warehouse_name: Serverless Starter Warehouse
+
+# Operational tables
+tables:
+  ingestion_log: _ingestion_log        # bronze
+  quarantine: _quarantine              # bronze: rows that failed CSV parsing / typing
+  rejected: _rejected_records          # silver: rows rejected by business validation
+  dq_results: data_quality_results     # gold: auditable data-quality results
+
+# Business rules (documented in docs/business_metrics.md)
+business_rules:
+  # Order statuses documented by Olist. Anything else is flagged, never silently mapped.
+  known_order_statuses: [created, approved, invoiced, processing, shipped, delivered, canceled, unavailable]
+  # Orders in these statuses are excluded from sales measures (GMV, AOV, ...).
+  non_sale_statuses: [canceled, unavailable]
+  known_payment_types: [credit_card, boleto, voucher, debit_card, not_defined]
+  # Tolerance (BRL) when reconciling item totals (price + freight) with payment totals per order.
+  payment_reconciliation_tolerance: 1.00
+  # Bounding box for Brazil, used to flag implausible geolocation coordinates.
+  brazil_bbox: {lat_min: -33.75, lat_max: 5.27, lng_min: -73.99, lng_max: -34.79}
+
+# Data-quality thresholds. severity=critical failures stop the pipeline.
+data_quality:
+  max_corrupt_record_ratio: 0.001
+  max_payment_mismatch_ratio: 0.01
+  min_bronze_rows:
+    orders: 90000
+    order_items: 100000
+    order_payments: 95000
+    order_reviews: 90000
+    customers: 90000
+    products: 30000
+    sellers: 3000
+    geolocation: 900000
+    category_translation: 60
+
+# Source datasets: Brazilian E-Commerce Public Dataset by Olist, official Olist GitHub repository.
+source_base_url: https://raw.githubusercontent.com/olist/work-at-olist-data/master/datasets
+source_name: olist_brazilian_ecommerce
+
+sources:
+  orders:
+    file: olist_orders_dataset.csv
+    primary_key: [order_id]
+    schema:
+      - order_id STRING
+      - customer_id STRING
+      - order_status STRING
+      - order_purchase_timestamp TIMESTAMP
+      - order_approved_at TIMESTAMP
+      - order_delivered_carrier_date TIMESTAMP
+      - order_delivered_customer_date TIMESTAMP
+      - order_estimated_delivery_date TIMESTAMP
+  order_items:
+    file: olist_order_items_dataset.csv
+    primary_key: [order_id, order_item_id]
+    schema:
+      - order_id STRING
+      - order_item_id INT
+      - product_id STRING
+      - seller_id STRING
+      - shipping_limit_date TIMESTAMP
+      - price DECIMAL(12,2)
+      - freight_value DECIMAL(12,2)
+  order_payments:
+    file: olist_order_payments_dataset.csv
+    primary_key: [order_id, payment_sequential]
+    schema:
+      - order_id STRING
+      - payment_sequential INT
+      - payment_type STRING
+      - payment_installments INT
+      - payment_value DECIMAL(12,2)
+  order_reviews:
+    file: olist_order_reviews_dataset.csv
+    # review_id alone is NOT unique in the source (one review can cover several orders).
+    primary_key: [review_id, order_id]
+    schema:
+      - review_id STRING
+      - order_id STRING
+      - review_score INT
+      - review_comment_title STRING
+      - review_comment_message STRING
+      - review_creation_date TIMESTAMP
+      - review_answer_timestamp TIMESTAMP
+  customers:
+    file: olist_customers_dataset.csv
+    primary_key: [customer_id]
+    schema:
+      - customer_id STRING
+      - customer_unique_id STRING
+      - customer_zip_code_prefix STRING
+      - customer_city STRING
+      - customer_state STRING
+  products:
+    file: olist_products_dataset.csv
+    primary_key: [product_id]
+    schema:
+      - product_id STRING
+      - product_category_name STRING
+      - product_name_lenght INT          # source spelling preserved in bronze
+      - product_description_lenght INT
+      - product_photos_qty INT
+      - product_weight_g INT
+      - product_length_cm INT
+      - product_height_cm INT
+      - product_width_cm INT
+  sellers:
+    file: olist_sellers_dataset.csv
+    primary_key: [seller_id]
+    schema:
+      - seller_id STRING
+      - seller_zip_code_prefix STRING
+      - seller_city STRING
+      - seller_state STRING
+  geolocation:
+    file: olist_geolocation_dataset.csv
+    # No key in the source: ~1M rows for ~19k zip prefixes. Aggregated in silver.
+    primary_key: []
+    schema:
+      - geolocation_zip_code_prefix STRING
+      - geolocation_lat DOUBLE
+      - geolocation_lng DOUBLE
+      - geolocation_city STRING
+      - geolocation_state STRING
+  category_translation:
+    file: product_category_name_translation.csv
+    primary_key: [product_category_name]
+    schema:
+      - product_category_name STRING
+      - product_category_name_english STRING

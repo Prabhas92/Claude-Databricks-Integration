@@ -1,0 +1,18 @@
+[project]
+name = "public_data_lakehouse"
+version = "1.0.0"
+description = "Medallion lakehouse on Databricks built from the public Olist Brazilian e-commerce dataset"
+requires-python = ">=3.10"
+dependencies = ["pyyaml>=6"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  # Matches the serverless environment version 4 runtime (Spark 4.x) used by the jobs.
+  "databricks-connect>=17.2,<18",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+markers = ["spark: needs a Spark session (Databricks Connect serverless)"]
